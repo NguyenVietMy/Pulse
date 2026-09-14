@@ -73,7 +73,9 @@ The eval harness already exists and is further along than it looks:
       trivial:** `AnthropicService.recordUsage`
       already reads `usage.inputTokens()`/`outputTokens()` — 2.1 is just emitting those as
       Micrometer counters. Note Langfuse already computes dollar cost server-side, so the pricing
-      table 2.1 calls for is only needed for the Prometheus path.
+      table 2.1 calls for is only needed for the Prometheus path. **Live in production since issue
+      11** (`environment=dev`): the first prod chat trace costed at $0.006771 across three Haiku 4.5
+      generations, so 2.4's before/after can be read off real traffic, not just local runs.
 - [ ] **2.3 Model config.** Make the model per-operation configurable (properties-driven) instead
       of hard-coded constants in `AnthropicService`. (The digest 3.5-turbo→cheap-tier win landed
       already as part of the provider switch: digest now runs on Haiku 4.5.)

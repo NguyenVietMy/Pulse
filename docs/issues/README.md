@@ -17,7 +17,7 @@ and the facts a cold start gets wrong.
 | [08](08-chatservice-http-client.md) | `ChatService` → HTTP client | B · Agent | 07 | 3h | ☑ |
 | [09](09-langfuse-java-otel.md) | Langfuse tracing from Java | C · Obs | — | 4h | ☑ |
 | [10](10-langfuse-python-trace-propagation.md) | Langfuse in Python + trace propagation | C · Obs | 07, 09 | 4h | ☑ |
-| [11](11-deploy-agent-to-ecs.md) | Deploy `agent/` to ECS | D · Deploy | 08, 10 | 6h | ☐ |
+| [11](11-deploy-agent-to-ecs.md) | Deploy `agent/` to ECS | D · Deploy | 08, 10 | 6h | ☑ |
 | [12](12-cheap-always-on-hosting.md) | Move always-on hosting to a ~$3–5/mo single host | D · Deploy | 11 | 5h | ☐ |
 
 **Total: ~50h.** Critical path: `01 → 02 → 03 → 07 → 08 → 10 → 11` (~34h).

@@ -141,6 +141,15 @@ resource "aws_service_discovery_service" "api" {
 
   # ECS registers and deregisters task IPs itself; this marks health as externally managed.
   health_check_custom_config {}
+
+  # GetService omits HealthCheckCustomConfig once its only field (failure_threshold) is unset, so
+  # the block never lands in state and each plan wants to add it back — and the block is ForceNew.
+  # Left alone that replaces both Cloud Map services on every apply, deregistering the running
+  # tasks from private DNS. Type=DNS_HTTP on the live service confirms the config did apply; only
+  # the read-back is lossy.
+  lifecycle {
+    ignore_changes = [health_check_custom_config]
+  }
 }
 
 resource "aws_service_discovery_service" "agent" {
@@ -158,6 +167,11 @@ resource "aws_service_discovery_service" "agent" {
 
   # ECS registers and deregisters task IPs itself; this marks health as externally managed.
   health_check_custom_config {}
+
+  # See the note on the api service above: the block is ForceNew and never reads back.
+  lifecycle {
+    ignore_changes = [health_check_custom_config]
+  }
 }
 
 # ---------- ECR ----------
@@ -278,6 +292,12 @@ module "ecs_agent" {
     # Must match the API's Langfuse project, or the two halves of a chat trace split in two.
     LANGFUSE_HOST = local.langfuse_host
     PULSE_API_URL = "http://api.${local.internal_namespace}:8080"
+
+    # Langfuse builds its resource with Resource.create(), which merges OTel's env detector — so
+    # this is what names the Python half of a chat trace. Without it those spans export as
+    # "unknown_service" while the Java half says "pulse-api", and prod traces can't be filtered
+    # by service. The Java side gets the equivalent from its own OTLP config, not from here.
+    OTEL_SERVICE_NAME = "pulse-agent"
   }
 }
 

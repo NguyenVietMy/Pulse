@@ -3,14 +3,16 @@
 Start here to pick up work on `PRD-agentic.md` / `docs/issues/`. Written to be readable cold, by a
 fresh session or by you in three weeks.
 
-**Status as of 2026-08-01:** issues **01–10** landed. **V66 is
+**Status as of 2026-08-01:** issues **01–11** landed — the PRD's issue list is complete. **V66 is
 applied** — the schema is at v66, `knowledge_chunks.embedding` is gone, and an authenticated chat
 turn was verified in the browser with sources still cited. The Qdrant track (A) is complete,
 `agent/` runs a real LangGraph `StateGraph` end to end against live Qdrant + Anthropic, and the
 Java side is now a **client** of it: `ChatService` assembles no context and calls no model.
 Observability track (C) is done: one Langfuse trace now spans Java → Python → each graph node →
-Anthropic, with prompt and completion bodies stripped on both sides.
-Next up: **11** (deploy `agent/` to ECS).
+Anthropic, with prompt and completion bodies stripped on both sides. **Both services now run on
+ECS Fargate and prod chat is served by the agent**, verified end to end (issue 11).
+Next up: **12** (move always-on hosting to a ~$3–5/mo host — a cost decision, not a rewrite; the
+AWS stack in `infra/` stays exactly as it is).
 
 ---
 
@@ -83,12 +85,16 @@ Paste something like:
 Issue **06** has no blockers — greenfield, zero regression risk to working code.
 
 ```
-01 → 05 → 06 → 02 → 03 → 09 → 07 → 08 → 10 → 04 → 11
+01 → 05 → 06 → 02 → 03 → 09 → 07 → 08 → 10 → 04 → 11 → 12
 ```
 
-Critical path is `01 → 02 → 03 → 07 → 08 → 10 → 11` (~34h of ~45h total).
+Critical path is `01 → 02 → 03 → 07 → 08 → 10 → 11` (~34h of ~50h total). **All of it is done.**
 **04 (drop pgvector) is deliberately second-to-last** — never delete the old path before the new one
 serves real traffic.
+
+**12 is not part of `PRD-agentic.md`.** It is a follow-on cost decision: move always-on hosting to a
+~$3–5/mo single host, keeping `infra/` intact and un-downgraded. Issue 11 exists partly to give it
+real numbers to argue from — see issue 11's cost table, where **$49/mo of the $79 is NAT + ALB**.
 
 ---
 
@@ -259,10 +265,11 @@ live in one language again.
 `chunkRepo` (for `getIndexStatus`) plus `AgentClient` plus the four contract records, and nothing
 else. Four things a cold start should know:
 
-- **Prod chat is degraded until issue 11 deploys the agent.** `pulse.agent.url` defaults to
-  `http://localhost:8001`, and ECS runs no agent yet, so every prod chat turn now returns the
-  "temporarily unavailable" fallback instead of an answer. That is by design (08 before 11), not a
-  bug — but do not leave it sitting there. Issue 11 must set `AGENT_URL` in `extra_environment`.
+- ~~**Prod chat is degraded until issue 11 deploys the agent.**~~ **Fixed in issue 11** — it set
+  `AGENT_URL = "http://agent.pulse.local:8001"` in `extra_environment`, and a real prod turn is
+  now agent-served. The underlying trap stands: `pulse.agent.url` still defaults to
+  `http://localhost:8001`, so anything that drops that env var degrades chat **silently**, at
+  HTTP 200. The cheap check is trace cost — a chat trace with `cost = $0` never reached a model.
 - **The fallback lives in `AgentClient`, and it swallows every `RuntimeException`** — unreachable,
   timeout, 4xx, 5xx, decode failure all become the same degraded `ChatResponse`. A silent "the
   assistant is temporarily unavailable" in the UI means: read the API log, the cause is only there.
@@ -300,6 +307,35 @@ drives one real chat through `AgentClient` at the running agent and prints the t
 tagged `langfuse`, so `mvn test` skips it. `/api/personal/chat` is behind Google OAuth, which is
 why there is no headless path through the controller.
 
+**Both services run on ECS as of issue 11, and the topology has five non-obvious properties.**
+
+- **Cloud Map registers *both* services, not just the agent.** `api.pulse.local:8080` and
+  `agent.pulse.local:8001` in the `pulse.local` private DNS namespace. The agent needs the reverse
+  direction because it calls back into `/internal/context/*`, and the public ALB answers those with
+  a fixed 404 — so without an `api.pulse.local` record the agent has no route to the API at all.
+- **The two security-group rules are deliberately asymmetric.** The agent's SG admits the API's
+  *security group*; the API's SG admits the private-subnet *CIDRs*. Symmetric SG-to-SG references
+  are a Terraform cycle, and these are inline `ingress` blocks, which cannot be mixed with a
+  standalone `aws_security_group_rule` without the provider fighting itself. The private subnets
+  hold only these two tasks and `/internal/**` still requires the shared secret. The reasoning is
+  in a comment at `infra/modules/ecs_api/main.tf` — read it before "tidying" the rule.
+- **The agent has no load balancer and no listener.** Not-public is a property of the topology, not
+  of a rule that could be misordered. Do not add a target group to "make it testable".
+- **`AGENT_URL` and `LANGFUSE_ENABLED` live in Terraform, and both default to something useless.**
+  `pulse.agent.url` defaults to `http://localhost:8001` (every prod chat would hit the issue-08
+  fallback) and `langfuse.enabled` defaults to `false` (the deployed API traced *nothing* before
+  issue 11). Neither failure is loud. `infra/environments/dev/main.tf` is the prod contract.
+- **`terraform apply` succeeding is not the same as the stack being converged.** Issue 11 shipped
+  a plan that applied cleanly and then wanted to replace both Cloud Map services on every
+  subsequent run — see its *Two traps* section. After any apply here, re-run `plan` and require a
+  no-op.
+
+**The GitHub OIDC provider is shared with another project — it is a `data` source on purpose.**
+`arn:aws:iam::520622116399:oidc-provider/token.actions.githubusercontent.com` is account-global and
+`contentlens-github-actions` federates to the same one. Managing it here would make `./teardown.ps1`
+delete it and silently break that project's deploys. If an apply ever fails with
+`EntityAlreadyExists` on an account-level singleton, the answer is `data`, not `terraform import`.
+
 ---
 
 ## 4. Ground rules (from `CLAUDE.md`)
@@ -328,9 +364,15 @@ From `PRD-agentic.md` §9:
 - [x] One Langfuse trace per chat spanning Java → Python → Anthropic, with token counts and
       **zero raw resume text** — issue 10. Trace `ce5d1e1aaee404fd23e8153bc63d52a3`, 21
       observations; `input`/`output` null on all 55 observations across three audited traces.
-- [ ] Chat p95 within +40% of the pre-migration baseline
-- [ ] Both services healthy on ECS; prod chat served by the agent path
-- [ ] `app/` unchanged and still rendering routing decisions
+- [ ] Chat p95 within +40% of the pre-migration baseline — **still open, and not measurable yet.**
+      Production has exactly **one** chat trace (14.4 s); a p95 from n=1 is not a p95. The
+      pre-migration baseline was never captured either, so both columns are missing. Issue 11's
+      Result table has the honest per-trace numbers instead.
+- [x] Both services healthy on ECS; prod chat served by the agent path — issue 11. Agent
+      `RUNNING`/`HEALTHY` with no public IP; prod trace `bfd18dd9960f6cc888f65484489e866c` shows
+      the full Java → Python → Anthropic tree.
+- [x] `app/` unchanged and still rendering routing decisions — zero files under `app/` changed
+      across issues 07–11; the deployed frontend rendered the agent's answer through the same UI.
 
 Then fill in the bracketed numbers in `PRD-agentic.md` §11. Unmeasured resume claims are the ones
 that collapse under questioning.
@@ -345,6 +387,9 @@ Not blockers, but decide them when you reach the issue:
   embedding column, or kept one release as a fallback?~~ **Decided in issue 04: kept.** Remove both,
   plus the GIN index, once the agent path serves prod chat — issue 08 cut the Java code over, so
   this is waiting on issue 11 deploying the agent, not on more code.
+  **Unblocked 2026-08-01:** issue 11 deployed the agent and prod chat is served by it, so the
+  condition is met. Nothing in Java reads `search_vector` any more — this is now a migration to
+  write, not a decision to make.
 - ~~**Issue 08:** once `ChatService` becomes an HTTP client, `HybridRetrievalService` has zero Java
   callers — the issue-03 parity harness that also used to hold it alive was deleted by issue 04.
   Delete it in 08.~~ **Done — deleted in 08.**
@@ -355,5 +400,14 @@ Not blockers, but decide them when you reach the issue:
   `ObjectMapper`, so a ```` ```json ```` fence or a trailing comma returned a 500.~~ **Fixed** —
   `platform/ai/ModelJson.java` strips the fence and tolerates trailing commas, and all five
   model-output call sites go through it. The injected `ObjectMapper` stays strict for HTTP bodies.
-- **Issue 11:** Cloud Map service discovery vs. an internal ALB listener for api → agent.
-  Recommendation: Cloud Map — the agent should have no public listener at all.
+- ~~**Issue 11:** Cloud Map service discovery vs. an internal ALB listener for api → agent.
+  Recommendation: Cloud Map — the agent should have no public listener at all.~~ **Decided: Cloud
+  Map, and in *both* directions** — see §3.
+- **Left by issue 11:** the agent → API return hop is not trace-propagated. The three
+  `/internal/context/*` calls land as three separate Langfuse traces instead of children of the
+  chat trace, because `agent/clients/pulse_api.py` builds a bare `httpx.AsyncClient` that never
+  injects `traceparent`. Issue 10 built Java → Python only. One-file fix, but it is agent source,
+  so it was left out of a deployment issue.
+- **Left by issue 11:** `DailySuggestionService` throws `Unexpected end-of-input: was expecting
+  closing quote` in prod — a **truncated** model response (max_tokens), which is a different bug
+  from the ```` ```json ```` fence `ModelJson` already fixed. Pre-existing, unrelated to the agent.

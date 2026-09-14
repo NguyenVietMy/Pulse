@@ -26,20 +26,24 @@ leaves the AWS path parked.
 
 ## Why the current bill is what it is
 
-Measured against `infra/environments/dev/main.tf` as of issue 11. Prices are `us-east-1`
-on-demand list and should be re-checked at implementation time, not trusted from this table.
+Measured against `infra/environments/dev/main.tf` with the stack **actually applied and running**
+(issue 11). Rates below were pulled from the **AWS Pricing API on 2026-08-01**, `us-east-1`
+on-demand, at 730 hr/mo — not from a pricing page or from memory. Re-check at implementation time.
 
-| Line item | Driver | ~$/mo |
+| Line item | Driver | $/mo |
 |---|---|---|
-| NAT Gateway | `modules/network/main.tf:64` — one gateway, $0.045/hr + $0.045/GB | ~$33 |
-| Application Load Balancer | `modules/ecs_api/main.tf:54` — $0.0225/hr + LCUs | ~$17 |
-| Fargate ×2 (0.25 vCPU / 512 MB) | api + agent tasks | ~$18 |
-| Secrets Manager | 22 secrets × $0.40 | ~$9 |
-| ECR, CloudWatch Logs, egress | small | ~$2 |
-| **Total** | | **~$75–80** |
+| NAT Gateway | `modules/network/main.tf:64` — one gateway, $0.045/hr + $0.045/GB | $32.85 |
+| Application Load Balancer | `modules/ecs_api/main.tf:54` — $0.0225/hr + $0.008/LCU-hr | $16.43 |
+| Fargate ×2 (0.25 vCPU / 512 MB) | api + agent, $0.04048/vCPU-hr + $0.004445/GB-hr | $18.02 |
+| Secrets Manager | 23 secrets × $0.40 | $9.20 |
+| Cloud Map | private DNS zone $0.50 + 2 instances × $0.10 | $0.70 |
+| Route 53 zone, ECR, CloudWatch Logs, egress | small | ~$1.50 |
+| **Total** | | **~$79** |
 
-Two thirds of that is NAT + ALB — infrastructure whose entire job is to give two containers a
-private network and one TLS endpoint. A single host gives both for free.
+**$49.28 of that $79 — 62% — is NAT + ALB**, infrastructure whose entire job is to give two
+containers a private network and one TLS endpoint. A single host gives both for free: containers
+share a Docker bridge network, and Caddy terminates TLS. The two Fargate tasks are only $18 of the
+bill, so the workload was never the expensive part — the AWS-shaped *plumbing around* it was.
 
 **AWS cannot reach the target by reshaping.** Dropping the NAT (public subnets, `assign_public_ip`),
 dropping the ALB (Cloudflare straight to a task IP), and moving to Fargate Spot still lands around
@@ -98,7 +102,7 @@ achieves by giving it no target group.
 
 ### 3. Environment file generation
 
-The 22 Secrets Manager entries collapse back into the two gitignored env files Compose already
+The 23 Secrets Manager entries collapse back into the two gitignored env files Compose already
 reads. **The trap:** `infra/environments/dev/main.tf`'s `extra_environment` and the `ecs_api`
 module's hardcoded `environment` block carry values that exist in *neither* env file:
 
@@ -110,7 +114,9 @@ module's hardcoded `environment` block carry values that exist in *neither* env 
 | `SLACK_REDIRECT_URI`, `LINEAR_REDIRECT_URI` | `ecs_api/main.tf:187,188` | Integration OAuth breaks |
 | `CORS_ALLOWED_ORIGINS` | `ecs_api/main.tf:190` | Browser calls blocked |
 | `OBSERVABILITY_*` (10 vars) | `main.tf` `extra_environment` | Tracing/metrics silently off |
-| `AGENT_URL`, `PULSE_API_URL` | issue 11 Cloud Map wiring | Falls back to `localhost` → degraded chat |
+| `LANGFUSE_ENABLED=true`, `LANGFUSE_HOST` | issue 11 `extra_environment` | `langfuse.enabled` defaults to `false` — the API traces **nothing**, silently |
+| `AGENT_URL`, `PULSE_API_URL` | issue 11 Cloud Map wiring | Falls back to `localhost` → degraded chat, still HTTP 200 |
+| `OTEL_SERVICE_NAME=pulse-agent` | issue 11 agent `extra_environment` | Agent spans export as `unknown_service`; prod traces can't be filtered by service |
 
 Write `scripts/render-env.ps1` (or extend the existing spinup pattern) that reads
 `infra/environments/dev/secrets.json` — already the master copy of every secret value — and emits
@@ -165,7 +171,7 @@ Ubuntu LTS, `ufw` allowing 22/80/443 only, unattended-upgrades, SSH keys only, d
 
 The ECS/Fargate/Terraform work is not wasted and should not be described as replaced. The honest and
 stronger framing is a cost decision made with numbers: *"Ran the service on ECS Fargate behind an
-ALB with Terraform-managed infrastructure; measured $75/mo of which two thirds was NAT gateway and
+ALB with Terraform-managed infrastructure; measured $79/mo of which $49 — 62% — was NAT gateway and
 load balancer serving two containers, and moved steady-state hosting to a single $4/mo host with
 Caddy and Compose — a 95% reduction with no application changes, keeping the ECS path in code for
 when the traffic justifies it."*
